@@ -298,7 +298,7 @@ def test_sync_unchanged_fetches_no_details(fake, capsys, tmp_path):
     main.main(["sync", "--snapshot", str(snap), "--json"], ENV)
     assert len(f.requests) == 1
     out = json.loads(capsys.readouterr().out)
-    assert out == {"new": [], "gone": [], "changed": [], "unchanged": ["A-1"]}
+    assert out == {"new": [], "gone": [], "changed": [], "touched": [], "unchanged": ["A-1"]}
 
 
 def test_sync_reports_changed_fields_with_old_and_new(fake, capsys, tmp_path):
@@ -374,3 +374,207 @@ def test_comment_refuses_empty_body(fake, capsys):
     f = fake({"id": "1"})
     assert main.main(["comment", "A-1", "  "], ENV) == 2
     assert f.requests == []
+
+
+# --- sync: comment-only updates, timetracking buckets -------------------------------------------
+
+def page_of(*rows):
+    return {"issues": [{"key": k, "fields": {"summary": "S", "status": {"name": "To Do"},
+                                             "priority": {"name": "High"}, "updated": u}}
+                       for k, u in rows]}
+
+
+def with_comments(key, *authors):
+    it = issue(key)
+    it["fields"]["comment"] = {"comments": [
+        {"author": {"displayName": a}, "created": "2026-11-20T10:00:00.000+0100"} for a in authors]}
+    return it
+
+
+def test_sync_reports_comment_only_update_as_touched(fake, tmp_path):
+    snap = tmp_path / "snapshot.json"
+    fake(page_of(("A-1", "t1")), with_comments("A-1", "Ann"))
+    main.sync(main.load_config(ENV), snap)
+    fake(page_of(("A-1", "t2")), with_comments("A-1", "Ann", "Bob"))
+    diff = main.sync(main.load_config(ENV), snap)
+    assert diff["changed"] == [] and diff["unchanged"] == []
+    assert diff["touched"] == [{"key": "A-1", "new_comments": 1, "last_comment": {
+        "author": "Bob", "created": "2026-11-20T10:00:00.000+0100"}}]
+    assert "A-1 1 new comment(s), last comment by Bob" in main.format_sync(diff)
+
+
+def test_sync_skips_timetracking_buckets(fake, tmp_path):
+    snap = tmp_path / "snapshot.json"
+    snap.write_text(json.dumps({"TIME-304": {"updated": "old"}}))
+    f = fake(page_of(("TIME-304", "new")))
+    diff = main.sync(main.load_config(ENV), snap)
+    assert diff == {"new": [], "gone": [], "changed": [], "touched": [], "unchanged": []}
+    assert len(f.requests) == 1
+    assert json.loads(snap.read_text()) == {}
+
+
+# --- board ----------------------------------------------------------------------------
+
+PLAN = """# [{key}](https://acme.atlassian.net/browse/{key}): Title of {key}
+
+Task · To Do · High · planned 2026-11-10
+
+## Repo and files
+
+- Repo: {repo}
+
+## Open questions for the ticket writer
+
+{questions}
+"""
+
+
+@pytest.fixture
+def tdir(tmp_path):
+    d = tmp_path / "tickets"
+    d.mkdir()
+    keys = ["A-1", "A-2", "A-3", "A-4", "A-5", "A-6", "TIME-9"]
+    (d / "snapshot.json").write_text(json.dumps({
+        k: {"summary": f"Sum {k}", "status": "To Do", "priority": "High", "url": f"u/{k}"} for k in keys}))
+    (d / "A-2.md").write_text(PLAN.format(key="A-2", repo="/r/x", questions="None."))
+    (d / "A-3.md").write_text(PLAN.format(key="A-3", repo="/r/x", questions="1. Why?\n2. How?"))
+    (d / "A-4.md").write_text(PLAN.format(key="A-4", repo="unknown, see open questions", questions="1. Which repo?"))
+    (d / "A-5.md").write_text(PLAN.format(key="A-5", repo="/r/x", questions="None."))
+    (d / "A-5.review.md").write_text("## Verdict: FIX\n\nround 2\n\n## Verdict: OK\n")
+    (d / "A-6.md").write_text(PLAN.format(key="A-6", repo="/r/x", questions="None."))
+    (d / "A-6.notes.md").write_text(
+        "- 2026-11-09: repo: /r/x\n"
+        "- 2026-11-12: REPORT pushed. Did it. Branch b, abc. Tests 3 passed. Next: test on stage.\n"
+        "  Open: none.\n")
+    (d / "TODO-1.notes.md").write_text("# TODO-1 — Old thing\n\n- 2026-11-01: (user) Done.\n- 2026-11-02: late fact\n")
+    (d / "TODO-2.notes.md").write_text("- 2026-11-03: added. New thing to do. More text.\n")
+    (d / "TODO-3.notes.md").write_text("# TODO-3 — Became a ticket\n\n- 2026-11-03: Jira key A-1 (url).\n"
+                                       "- 2026-11-04: REPORT stage. X. Next: go live.\n")
+    (d / "Z-9.md").write_text(PLAN.format(key="Z-9", repo="/r/x", questions="None."))
+    return d
+
+
+def test_board_qualifies_each_ticket(tdir, tmp_path):
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", home=tmp_path)}
+    assert list(rows) == ["TODO-2", "A-1", "A-2", "A-3", "A-4", "A-5", "A-6"]
+    assert {k: r["qual"] for k, r in rows.items()} == {
+        "TODO-2": "-", "A-1": "REPORTED", "A-2": "READY", "A-3": "BLOCKED", "A-4": "NO-REPO",
+        "A-5": "FEEDBACK", "A-6": "REPORTED"}
+    assert rows["A-3"]["next"] == "Clarify 2 questions"
+    assert rows["A-6"]["next"] == "test on stage"
+    assert rows["A-6"]["report"] == {"date": "2026-11-12", "state": "pushed", "next": "test on stage"}
+    assert rows["A-1"]["files_under"] == "TODO-3" and rows["A-1"]["next"] == "go live"
+    assert rows["TODO-2"]["title"] == "New thing to do. More text."
+
+
+def test_board_all_and_named_keys_include_closed_and_gone(tdir, tmp_path):
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", everything=True, home=tmp_path)}
+    assert rows["TODO-1"]["qual"] == "DONE" and rows["TODO-1"]["title"] == "Old thing"
+    assert rows["Z-9"]["in_jira"] is False and rows["Z-9"]["qual"] == "READY"
+    assert "TIME-9" not in rows
+    only = main.board(tdir, tdir / "snapshot.json", keys=["TODO-1"], home=tmp_path)
+    assert [r["key"] for r in only] == ["TODO-1"]
+
+
+def test_board_command_needs_no_credentials_and_prints_md(tdir, capsys):
+    assert main.main(["board", "--md", "--tickets", str(tdir)], env={}) == 0
+    out = capsys.readouterr().out
+    assert "| [A-3](u/A-3) | Sum A-3 | To Do | High | BLOCKED | Clarify 2 questions |" in out
+    assert "| TODO-2 | New thing to do. More text. | — | — | — |  |" in out
+
+
+def test_board_wiki_writes_tickets_page(tdir, capsys):
+    (tdir.parent / "wiki").mkdir()
+    assert main.main(["board", "--wiki", "--tickets", str(tdir)], env={}) == 0
+    page = (tdir.parent / "wiki" / "tickets.md").read_text()
+    assert page.startswith("---\ntype: overview\n")
+    assert "| TODO-1 | Old thing | TODO | done |" in page
+    assert "| [A-6](u/A-6) | Sum A-6 | A | pushed | `/r/x` | 2026-11-12 | test on stage | plan, notes |" in page
+
+
+def test_git_state_reads_branch_dirty_and_unpushed(tmp_path, monkeypatch):
+    out = "# branch.oid abc\n# branch.head fix/A-1\n# branch.upstream origin/fix/A-1\n# branch.ab +2 -0\n1 .M N... a.py\n? new.txt\n"
+    monkeypatch.setattr(main.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0, "stdout": out})())
+    assert main.git_state(str(tmp_path)) == {"branch": "fix/A-1", "dirty": 2, "unpushed": 2}
+    monkeypatch.setattr(main.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 128, "stdout": ""})())
+    assert main.git_state(str(tmp_path)) is None
+
+
+def test_aoa_home_default_and_override():
+    assert main.aoa_home({}) == main.Path("~/.aoa").expanduser()
+    assert main.aoa_home({"AOA_HOME": "/data/x"}) == main.Path("/data/x")
+
+
+def test_board_closed_needs_the_user_or_a_done_report(tdir, tmp_path):
+    notes = {"TODO-10": "- 2026-11-01: Done: migration script, rest still open\n",
+             "TODO-11": "- 2026-11-01: closed question 2 with the writer\n",
+             "TODO-12": "- 2026-11-01: closed by user: not ours\n",
+             "TODO-13": "- 2026-11-01: DONE (user ran it 15:47): moved\n",
+             "TODO-14": "- 2026-11-01: user said so. Status: done.\n",
+             "TODO-15": "- 2026-11-01: REPORT done. Shipped.\n",
+             "TODO-16": "- 2026-11-01: done (user).\n- 2026-11-02: reopened, still broken\n"}
+    for key, text in notes.items():
+        (tdir / f"{key}.notes.md").write_text(text)
+    rows = {r["key"]: r["closed"] for r in main.board(tdir, tdir / "snapshot.json", everything=True, home=tmp_path)}
+    assert {k: rows[k] for k in notes} == {"TODO-10": False, "TODO-11": False, "TODO-12": True, "TODO-13": True,
+                                           "TODO-14": True, "TODO-15": True, "TODO-16": False}
+
+
+def test_board_todo_without_plan_or_report_does_not_blank_its_jira_row(tdir, tmp_path):
+    (tdir / "TODO-3.notes.md").write_text("- 2026-11-03: Jira key A-1 (url).\n")
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", home=tmp_path)}
+    assert rows["A-1"]["qual"] == "UNPLANNED" and rows["A-1"]["next"] == "Plan it"
+
+
+def test_board_named_key_gets_the_state_of_its_linked_todo(tdir, tmp_path):
+    (row,) = main.board(tdir, tdir / "snapshot.json", keys=["A-1"], home=tmp_path)
+    assert row["qual"] == "REPORTED" and row["files_under"] == "TODO-3"
+
+
+def test_board_report_does_not_make_notes_newer_but_a_decision_does(tdir, tmp_path):
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", home=tmp_path)}
+    assert rows["A-6"]["notes_newer"] is False
+    with (tdir / "A-6.notes.md").open("a") as f:
+        f.write("- 2026-11-13: writer says: only for admins\n")
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", home=tmp_path)}
+    assert rows["A-6"]["notes_newer"] is True
+
+
+def test_board_survives_broken_snapshot_and_odd_bytes_and_repo_without_colon(tdir, tmp_path):
+    (tdir / "snapshot.json").write_text("{ broken")
+    (tdir / "A-3.notes.md").write_bytes(b"- 2026-11-11: repo /r/y caf\xe9\n")
+    rows = {r["key"]: r for r in main.board(tdir, tdir / "snapshot.json", everything=True, home=tmp_path)}
+    assert rows["A-3"]["in_jira"] is False and "/r/y" in rows["A-3"]["repos"]
+
+
+def test_sync_treats_broken_snapshot_as_empty_and_replaces_it(fake, tmp_path):
+    snap = tmp_path / "snapshot.json"
+    snap.write_text("")
+    fake(page_of(("A-1", "t1")), with_comments("A-1"))
+    assert main.sync(main.load_config(ENV), snap)["new"] == ["A-1"]
+    assert list(json.loads(snap.read_text())) == ["A-1"] and not (tmp_path / "snapshot.json.tmp").exists()
+
+
+def test_sync_deleted_comment_is_not_a_negative_count(fake, tmp_path):
+    snap = tmp_path / "snapshot.json"
+    fake(page_of(("A-1", "t1")), with_comments("A-1", "Ann", "Bob"))
+    main.sync(main.load_config(ENV), snap)
+    fake(page_of(("A-1", "t2")), with_comments("A-1", "Ann"))
+    assert "A-1 updated, no field change" in main.format_sync(main.sync(main.load_config(ENV), snap))
+
+
+def test_dotenv_drops_inline_comment_and_fills_empty_values(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("AOA_SKIP_PREFIX=TIME-     # optional\nJIRA_EMAIL=me@acme.com\n")
+    env = {"JIRA_EMAIL": ""}
+    main.load_dotenv(f, env)
+    assert env == {"AOA_SKIP_PREFIX": "TIME-", "JIRA_EMAIL": "me@acme.com"}
+
+
+def test_watch_keeps_running_when_a_jira_check_fails(tdir, capsys, monkeypatch):
+    monkeypatch.setattr(main, "sync", lambda *a: (_ for _ in ()).throw(main.CliError("Connection failed: x", 1)))
+    def stop(_):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(main.time, "sleep", stop)
+    assert main.main(["board", "--sync", "--watch", "60", "--tickets", str(tdir)], env=dict(ENV)) == 0
+    assert "Jira check failed" in capsys.readouterr().out

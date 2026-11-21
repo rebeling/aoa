@@ -8,22 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-
-# Secrets
-.env
-tickets/snapshot.json
-
-# Knowledge base: local only, never committed (see README)
-tickets/*
-briefs/*
-wiki/*
-!tickets/.gitkeep
-!briefs/.gitkeep
-!wiki/.gitkeep
-!wiki/README.md
-errors/*
-!errors/.gitkeep
-reviews/
-sessions.md
-
 .pytest_cache/
+
+# Secrets and per-machine settings. Private data lives outside this repo in ~/.aoa
+.env
+.claude/settings.local.json

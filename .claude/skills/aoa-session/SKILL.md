@@ -7,14 +7,14 @@ description: Start a ticket in its own Claude session - "/aoa-session KEY". Prin
 
 Hub = this aoa session (brief, planning, notes, wiki, Slack/Tempo texts). Ticket work runs in its own session.
 
-1. Repo: from `tickets/KEY.notes.md` `repo:` line or `tickets/KEY.md` "Repo and files". Unknown → stop: "Name the repo: /aoa-brief KEY: repo <path>". Never guess.
-2. Base branch: `base:` note, else the repo's develop branch per `wiki/repos/<repo>.md`. `branch:` note → work on that branch, no new one. Existing clone whose branch contains KEY → reuse it.
+1. Repo: from `~/.aoa/tickets/KEY.notes.md` `repo:` line or `~/.aoa/tickets/KEY.md` "Repo and files". Unknown → stop: "Name the repo: /aoa-brief KEY: repo <path>". Never guess.
+2. Base branch: `base:` note, else the repo's develop branch per `~/.aoa/wiki/repos/<repo>.md`. `branch:` note → work on that branch, no new one. Existing clone whose branch contains KEY → reuse it.
 3. Print two code blocks:
-   - One-liner: `cd ~/work/<repo> && git worktree add ../<repo>-KEY -b <fix|feature>/KEY <base> && cd ../<repo>-KEY && claude`
+   - One-liner: `cd <repo path> && git worktree add ../<repo>-KEY -b <fix|feature>/KEY <base> && cd ../<repo>-KEY && claude`
    - First message:
      ```
-     Ticket KEY "<title>". Plan: ~/Desktop/aoa/tickets/KEY.md, notes: ~/Desktop/aoa/tickets/KEY.notes.md (read both; hub CLAUDE.md rules apply). Jira: cd ~/Desktop/aoa && uv run main.py get KEY --json --comments. Fix test-first, never commit (I commit). Commit and MR text: one line, no body, no Co-Authored-By, no Claude mention, no TODO-N key (local only). After each milestone (implemented, pushed, stage, live, done) run /aoa-report KEY.
+     Ticket KEY "<title>". Plan: ~/.aoa/tickets/KEY.md, notes: ~/.aoa/tickets/KEY.notes.md (read both; hub CLAUDE.md rules apply). Jira: cd ~/Desktop/aoa && uv run main.py get KEY --json --comments. Fix test-first, never commit (I commit). Commit and MR text: one line, no body, no Co-Authored-By, no Claude mention, no TODO-N key (local only). After each milestone (implemented, pushed, stage, live, done) run /aoa-report KEY.
      ```
-4. Append `- YYYY-MM-DD: session started in <workdir> on <branch>` to `tickets/KEY.notes.md`.
+4. Append `- YYYY-MM-DD: session started in <workdir> on <branch>` to `~/.aoa/tickets/KEY.notes.md`.
 
 Never start coder/reviewer, never open the session yourself.
